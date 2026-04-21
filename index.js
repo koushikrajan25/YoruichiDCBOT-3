@@ -170,7 +170,7 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.reply({
         embeds: [
           new EmbedBuilder()
-            .setColor(2E0854)
+            .setColor(0x2E0854)
             .setDescription(`⏭  **Skipped** by owner → now playing **#${currentIndex + 1} — ${playlist[currentIndex].name}**`),
         ],
       });
@@ -198,7 +198,7 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.reply({
         embeds: [
           new EmbedBuilder()
-            .setColor(2E0854)
+            .setColor(0x2E0854)
             .setTitle("⏭  Vote skip passed!")
             .setDescription(`Skipping to **#${currentIndex + 1} — ${playlist[currentIndex].name}**`)
             .setFooter({ text: `${votes}/${needed} votes reached` }),
@@ -209,7 +209,7 @@ client.on("interactionCreate", async (interaction) => {
     return interaction.reply({
       embeds: [
         new EmbedBuilder()
-          .setColor(2E0854)
+          .setColor(0x2E0854)
           .setTitle("🗳️  Vote to skip")
           .setDescription(`**${playlist[currentIndex].name}**`)
           .addFields(
@@ -238,7 +238,7 @@ client.on("interactionCreate", async (interaction) => {
     return interaction.reply({
       embeds: [
         new EmbedBuilder()
-          .setColor(2E0854)
+          .setColor(0x2E0854)
           .setTitle("🎵  Now Playing")
           .setDescription(`**${track.name}**`)
           .addFields(
@@ -276,7 +276,7 @@ client.on("interactionCreate", async (interaction) => {
     const pageLines = lines.slice(start, end);
 
     const embed = new EmbedBuilder()
-      .setColor(2E0854)
+      .setColor(0x2E0854)
       .setTitle("📋  Queue")
       .setDescription(pageLines.join("\n"))
       .setFooter({
@@ -325,7 +325,7 @@ client.on("interactionCreate", async (interaction) => {
     return interaction.reply({
       embeds: [
         new EmbedBuilder()
-          .setColor(2E0854)
+          .setColor(0x2E0854)
           .setTitle("⏩  Jumped to track")
           .setDescription(`**#${number} — ${playlist[currentIndex].name}**`)
           .setFooter({ text: "Playing now" }),
@@ -394,7 +394,7 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.editReply({
         embeds: [
           new EmbedBuilder()
-            .setColor(2E0854)
+            .setColor(0x2E0854)
             .setTitle("▶️  Playing")
             .setDescription(`**#${currentIndex + 1} — ${playlist[currentIndex].name}**`)
             .addFields(
@@ -426,7 +426,7 @@ client.on("interactionCreate", async (interaction) => {
     return interaction.reply({
       embeds: [
         new EmbedBuilder()
-          .setColor(2E0854)
+          .setColor(0x2E0854)
           .setDescription("⏸  **Paused** — use `/resume` to continue"),
       ],
     });
@@ -447,7 +447,7 @@ client.on("interactionCreate", async (interaction) => {
     return interaction.reply({
       embeds: [
         new EmbedBuilder()
-          .setColor(2E0854)
+          .setColor(0x2E0854)
           .setDescription(`▶️  **Resumed** — #${currentIndex + 1} — ${playlist[currentIndex].name}`),
       ],
     });
