@@ -6,6 +6,8 @@ const {
   SlashCommandBuilder,
   MessageFlags,
   EmbedBuilder,
+  StringSelectMenuBuilder,
+  ActionRowBuilder,
 } = require("discord.js");
 
 const {
@@ -19,50 +21,87 @@ const {
 } = require("@discordjs/voice");
 
 const path = require("path");
-const fs = require("fs");
+const fs   = require("fs");
 require("dotenv").config();
 
-const TOKEN = process.env.BOT_TOKEN;
+const TOKEN     = process.env.BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-const OWNER_ID = process.env.OWNER_ID;
+const OWNER_ID  = process.env.OWNER_ID;
 
-const AUDIO_FOLDER = path.resolve(__dirname, "audios");
 
-// Playlist ------------------------->
-const playlist = fs.existsSync(AUDIO_FOLDER)
-  ? fs.readdirSync(AUDIO_FOLDER)
-      .filter((file) => file.endsWith(".mp3"))
-      .sort() 
-      .map((file) => ({
-        name: path.basename(file, ".mp3"), // for display without (.mp3) extension-------------------------?>
-        file: path.join(AUDIO_FOLDER, file),
-      }))
-  : [];
+const DEFAULT_FOLDER = process.env.DEFAULT_FOLDER || null;
+const AUDIO_ROOT = path.resolve(__dirname, "audios"); //audio path folder --> sub folder 
 
-let currentIndex = 0;
-let isLooping = false;
+
+function loadTracksFromFolder(folderPath) {
+  if (!fs.existsSync(folderPath)) return [];
+  return fs
+    .readdirSync(folderPath)
+    .filter((f) => f.endsWith(".mp3"))
+    .sort()
+    .map((file) => ({
+      name: path.basename(file, ".mp3"),
+      file: path.join(folderPath, file),
+    }));
+}
+
+function discoverFolders() {
+  const folders = {};
+
+  if (!fs.existsSync(AUDIO_ROOT)) {
+    fs.mkdirSync(AUDIO_ROOT, { recursive: true });
+    return folders;
+  }
+
+  const entries = fs.readdirSync(AUDIO_ROOT, { withFileTypes: true });
+  const subDirs = entries
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+    .sort();
+
+  for (const dir of subDirs) {
+    const tracks = loadTracksFromFolder(path.join(AUDIO_ROOT, dir));
+    if (tracks.length > 0) folders[dir] = tracks;
+  }
+
+  // default
+  if (Object.keys(folders).length === 0) {
+    const rootTracks = loadTracksFromFolder(AUDIO_ROOT);
+    if (rootTracks.length > 0) folders["default"] = rootTracks;
+  }
+
+  return folders;
+}
+
+//State
+const allFolders  = discoverFolders();
+const folderNames = Object.keys(allFolders);
+
+let activeFolderName = DEFAULT_FOLDER && allFolders[DEFAULT_FOLDER]
+  ? DEFAULT_FOLDER
+  : folderNames[0] || null;
+
+let playlist          = activeFolderName ? allFolders[activeFolderName] : [];
+let currentIndex      = 0;
+let isLooping         = false;
 let currentConnection = null;
-let currentGuildId = null;
+let currentGuildId    = null;
 
-//Vote skip state------------------------->
 let voteSkipSet = new Set();
-let voteSkipActive = false;
 
 function resetVoteSkip() {
   voteSkipSet = new Set();
-  voteSkipActive = false;
 }
 
-//Audio player------------------------->
+//Audio Player
 const player = createAudioPlayer();
 
 function playAudio() {
   if (playlist.length === 0) return;
   const track = playlist[currentIndex];
   console.log(`🎵 Now playing: ${track.name}`);
-  const resource = createAudioResource(track.file);
-  player.play(resource);
-  resetVoteSkip();// reset function for new track -------------------------?>
+  resetVoteSkip();
+  player.play(createAudioResource(track.file));
 }
 
 player.on(AudioPlayerStatus.Idle, () => {
@@ -77,7 +116,7 @@ player.on("error", (err) => {
   if (isLooping) setTimeout(playAudio, 1000);
 });
 
-
+//Helper
 function getVCMemberCount(guild) {
   if (!currentConnection) return 0;
   const channelId = currentConnection.joinConfig?.channelId;
@@ -88,14 +127,14 @@ function getVCMemberCount(guild) {
 }
 
 function requiredVotes(memberCount) {
-  return Math.ceil(memberCount / 3); //calcaulation function 1/3 for vote skip-------------------------?>
+  return Math.ceil(memberCount / 3);
 }
 
-//Slash command definitions------------------------->
+//Slash Commands
 const commands = [
   new SlashCommandBuilder()
     .setName("play")
-    .setDescription("Joins VC and plays Sai's playlist"),
+    .setDescription("Joins VC and plays the active playlist"),
 
   new SlashCommandBuilder()
     .setName("pause")
@@ -123,45 +162,192 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("goto")
-    .setDescription("Jump to a specific track by its queue number")
+    .setDescription("Jump to a specific track by its queue number (owner only)")
     .addIntegerOption((opt) =>
       opt
         .setName("number")
-        .setDescription("Track number from the queue (Enter the number shown in /queue)")
+        .setDescription("Track number from /queue")
         .setRequired(true)
         .setMinValue(1)
     ),
+
+  new SlashCommandBuilder()
+    .setName("folders")
+    .setDescription("List all available audio folders"),
+
+  new SlashCommandBuilder()
+    .setName("switchfolder")
+    .setDescription("Switch to a different audio folder (owner only)")
+    .addStringOption((opt) =>
+      opt
+        .setName("name")
+        .setDescription("Folder name — leave empty for an interactive menu")
+        .setRequired(false)
+    ),
 ].map((c) => c.toJSON());
 
-//Register commands------------------------->
+//Register Commands
 async function registerCommands() {
   const rest = new REST({ version: "10" }).setToken(TOKEN);
   await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
   console.log("✅ Commands registered");
 }
 
-//Client------------------------->
+//Client
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildVoiceStates,
-  ],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
 });
 
-//Interaction handler------------------------->
+//Folder Switch Helper
+function handleFolderSwitch(interaction, folderName, isSelectMenu) {
+  const reply = (opts) =>
+    isSelectMenu
+      ? interaction.update({ ...opts, components: [] })
+      : interaction.reply(opts);
+
+  if (!allFolders[folderName]) {
+    return reply({
+      content: `❌ Folder \`${folderName}\` not found. Use /folders to see available ones.`,
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+
+  if (folderName === activeFolderName) {
+    return reply({
+      content: `ℹ️  Already on folder \`${folderName}\`.`,
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+
+  activeFolderName = folderName;
+  playlist         = allFolders[folderName];
+  currentIndex     = 0;
+  resetVoteSkip();
+
+  const wasPlaying = isLooping;
+  if (wasPlaying) {
+    player.stop();
+    isLooping = true;
+    playAudio();
+  }
+
+  return reply({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0x2E0854)
+        .setTitle("📁  Folder Switched")
+        .setDescription(`Now using **\`${folderName}\`**`)
+        .addFields(
+          { name: "Tracks", value: `${playlist.length}`, inline: true },
+          {
+            name:  "Status",
+            value: wasPlaying ? `▶ Playing #1 — ${playlist[0].name}` : "Idle",
+            inline: true,
+          }
+        )
+        .setFooter({ text: wasPlaying ? "Restarted from track 1" : "Use /play to start" }),
+    ],
+  });
+}
+
+//Interaction Handler
 client.on("interactionCreate", async (interaction) => {
+
+  // Select menu response for /switchfolder (no-arg flow)
+  if (interaction.isStringSelectMenu() && interaction.customId === "folder_select") {
+    if (interaction.user.id !== OWNER_ID) {
+      return interaction.reply({
+        content: "❌ Only the owner can switch folders.",
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+    return handleFolderSwitch(interaction, interaction.values[0], true);
+  }
+
   if (!interaction.isChatInputCommand()) return;
 
   const { commandName, guild, member } = interaction;
   const isOwner = interaction.user.id === OWNER_ID;
 
+  //folders
+  if (commandName === "folders") {
+    if (folderNames.length === 0) {
+      return interaction.reply({
+        content: "❌ No audio folders found inside `/audios/`.",
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+
+    const lines = folderNames.map((name) => {
+      const count  = allFolders[name]?.length || 0;
+      const active = name === activeFolderName ? " ◀ **active**" : "";
+      return `\`${name}\` — **${count}** track${count !== 1 ? "s" : ""}${active}`;
+    });
+
+    return interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x2E0854)
+          .setTitle("📁  Audio Folders")
+          .setDescription(lines.join("\n"))
+          .setFooter({ text: "Use /switchfolder to change the active playlist" }),
+      ],
+    });
+  }
+
+  //switchfolder
+  if (commandName === "switchfolder") {
+    if (!isOwner) {
+      return interaction.reply({
+        content: "❌ Only the owner can switch folders.",
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+
+    const nameArg = interaction.options.getString("name");
+
+    if (!nameArg) {
+      if (folderNames.length === 0) {
+        return interaction.reply({ content: "❌ No folders found.", flags: MessageFlags.Ephemeral });
+      }
+
+      const row = new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId("folder_select")
+          .setPlaceholder("Pick a folder…")
+          .addOptions(
+            folderNames.map((name) => ({
+              label:       name,
+              description: `${allFolders[name].length} tracks`,
+              value:       name,
+              default:     name === activeFolderName,
+            }))
+          )
+      );
+
+      return interaction.reply({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0x2E0854)
+            .setTitle("📁  Switch Folder")
+            .setDescription("Select a playlist folder:"),
+        ],
+        components: [row],
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+
+    return handleFolderSwitch(interaction, nameArg, false);
+  }
+
+  //skip
   if (commandName === "skip") {
     if (!isLooping && player.state.status !== AudioPlayerStatus.Playing) {
       return interaction.reply({
         content: "❌ Nothing is playing right now.",
         flags: MessageFlags.Ephemeral,
       });
-    }//Bot owner instant skip option-------------------------?>
+    }
 
     if (isOwner) {
       currentIndex = (currentIndex + 1) % playlist.length;
@@ -171,14 +357,15 @@ client.on("interactionCreate", async (interaction) => {
         embeds: [
           new EmbedBuilder()
             .setColor(0x2E0854)
-            .setDescription(`⏭  **Skipped** by owner → now playing **#${currentIndex + 1} — ${playlist[currentIndex].name}**`),
+            .setDescription(
+              `⏭  **Skipped** by owner → now playing **#${currentIndex + 1} — ${playlist[currentIndex].name}**`
+            ),
         ],
       });
     }
 
-//comman vote skip------------------------->
     const memberCount = getVCMemberCount(guild);
-    const needed = requiredVotes(memberCount);
+    const needed      = requiredVotes(memberCount);
 
     if (voteSkipSet.has(interaction.user.id)) {
       return interaction.reply({
@@ -191,7 +378,6 @@ client.on("interactionCreate", async (interaction) => {
     const votes = voteSkipSet.size;
 
     if (votes >= needed) {
-      //Enough votes : skip it-------------------------?>
       currentIndex = (currentIndex + 1) % playlist.length;
       resetVoteSkip();
       player.stop();
@@ -213,17 +399,16 @@ client.on("interactionCreate", async (interaction) => {
           .setTitle("🗳️  Vote to skip")
           .setDescription(`**${playlist[currentIndex].name}**`)
           .addFields(
-            { name: "Votes", value: `${votes} / ${needed}`, inline: true },
-            { name: "VC members", value: `${memberCount}`, inline: true },
-            { name: "Required (1/3)", value: `${needed}`, inline: true }
+            { name: "Votes",          value: `${votes} / ${needed}`, inline: true },
+            { name: "VC members",     value: `${memberCount}`,       inline: true },
+            { name: "Required (1/3)", value: `${needed}`,            inline: true }
           )
           .setFooter({ text: `${interaction.user.username} voted • Need ${needed - votes} more vote(s)` }),
       ],
     });
   }
 
-//nowplaying------------------------->
-
+  //nowplaying
   if (commandName === "nowplaying") {
     if (!isLooping || playlist.length === 0) {
       return interaction.reply({
@@ -232,7 +417,7 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
-    const track = playlist[currentIndex];
+    const track     = playlist[currentIndex];
     const nextTrack = playlist[(currentIndex + 1) % playlist.length];
 
     return interaction.reply({
@@ -242,50 +427,45 @@ client.on("interactionCreate", async (interaction) => {
           .setTitle("🎵  Now Playing")
           .setDescription(`**${track.name}**`)
           .addFields(
-            { name: "Track", value: `#${currentIndex + 1} of ${playlist.length}`, inline: true },
-            { name: "Up next", value: `#${(currentIndex + 1) % playlist.length + 1} — ${nextTrack.name}`, inline: true }
+            { name: "Track",   value: `#${currentIndex + 1} of ${playlist.length}`,                       inline: true },
+            { name: "Up next", value: `#${(currentIndex + 1) % playlist.length + 1} — ${nextTrack.name}`, inline: true },
+            { name: "Folder",  value: `\`${activeFolderName}\``,                                           inline: true }
           )
           .setFooter({ text: "Use /skip to vote skip • /queue to see full list" }),
       ],
     });
   }
 
-//queue------------------------->
-
+  //queue
   if (commandName === "queue") {
     if (playlist.length === 0) {
       return interaction.reply({
-        content: "❌ No tracks loaded in /audios folder.",
+        content: "❌ No tracks loaded. Add .mp3 files to your audios folder.",
         flags: MessageFlags.Ephemeral,
       });
     }
 
-    //spl bold for current track in queue-------------------------?>
     const lines = playlist.map((track, i) => {
       const isCurrent = i === currentIndex && isLooping;
-      const num = String(i + 1).padStart(2, "0");
+      const num    = String(i + 1).padStart(2, "0");
       const prefix = isCurrent ? "▶" : "  ";
       return `${prefix} \`${num}\` ${isCurrent ? `**${track.name}**` : track.name}`;
     });
 
-//enbred for queue
-    const CHUNK = 20;
+    const CHUNK       = 20;
     const currentPage = Math.floor(currentIndex / CHUNK);
-    const start = currentPage * CHUNK;
-    const end = Math.min(start + CHUNK, playlist.length);
-    const pageLines = lines.slice(start, end);
+    const start       = currentPage * CHUNK;
+    const end         = Math.min(start + CHUNK, playlist.length);
 
     const embed = new EmbedBuilder()
       .setColor(0x2E0854)
-      .setTitle("📋  Queue")
-      .setDescription(pageLines.join("\n"))
-      .setFooter({
-        text: `Showing tracks ${start + 1}–${end} of ${playlist.length} `,
-      });
+      .setTitle(`📋  Queue — \`${activeFolderName}\``)
+      .setDescription(lines.slice(start, end).join("\n"))
+      .setFooter({ text: `Showing tracks ${start + 1}–${end} of ${playlist.length}` });
 
     if (isLooping) {
       embed.addFields({
-        name: "Now playing",
+        name:  "Now playing",
         value: `#${currentIndex + 1} — ${playlist[currentIndex].name}`,
       });
     }
@@ -293,7 +473,7 @@ client.on("interactionCreate", async (interaction) => {
     return interaction.reply({ embeds: [embed] });
   }
 
-//goto only for owner **need to implement for all with voting system**
+  //goto
   if (commandName === "goto") {
     if (!isOwner) {
       return interaction.reply({
@@ -301,7 +481,6 @@ client.on("interactionCreate", async (interaction) => {
         flags: MessageFlags.Ephemeral,
       });
     }
-
     if (!isLooping) {
       return interaction.reply({
         content: "❌ Nothing is playing. Use /play first.",
@@ -310,7 +489,6 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     const number = interaction.options.getInteger("number");
-
     if (number < 1 || number > playlist.length) {
       return interaction.reply({
         content: `❌ Invalid track number. Choose between **1** and **${playlist.length}**.`,
@@ -320,7 +498,7 @@ client.on("interactionCreate", async (interaction) => {
 
     currentIndex = number - 1;
     resetVoteSkip();
-    player.stop(); 
+    player.stop();
 
     return interaction.reply({
       embeds: [
@@ -333,7 +511,7 @@ client.on("interactionCreate", async (interaction) => {
     });
   }
 
-//
+  //Owneronly
   if (!isOwner) {
     return interaction.reply({
       content: "❌ You are not allowed to control this bot.",
@@ -341,9 +519,7 @@ client.on("interactionCreate", async (interaction) => {
     });
   }
 
-
-  //play------------------------->
-
+  //play
   if (commandName === "play") {
     const voiceChannel = member.voice?.channel;
 
@@ -353,10 +529,9 @@ client.on("interactionCreate", async (interaction) => {
         flags: MessageFlags.Ephemeral,
       });
     }
-
     if (playlist.length === 0) {
       return interaction.reply({
-        content: "❌ No audio files found in /audios folder.",
+        content: `❌ No .mp3 files found in folder \`${activeFolderName}\`.`,
         flags: MessageFlags.Ephemeral,
       });
     }
@@ -367,24 +542,23 @@ client.on("interactionCreate", async (interaction) => {
     if (existing) existing.destroy();
 
     try {
-      currentGuildId = guild.id;
+      currentGuildId    = guild.id;
       currentConnection = joinVoiceChannel({
-        channelId: voiceChannel.id,
-        guildId: guild.id,
+        channelId:      voiceChannel.id,
+        guildId:        guild.id,
         adapterCreator: guild.voiceAdapterCreator,
       });
 
       await entersState(currentConnection, VoiceConnectionStatus.Ready, 20000);
-
       currentConnection.subscribe(player);
       isLooping = true;
       resetVoteSkip();
 
       currentConnection.on(VoiceConnectionStatus.Disconnected, () => {
-        isLooping = false;
-        player.stop();
+        isLooping         = false;
         currentConnection = null;
-        currentGuildId = null;
+        currentGuildId    = null;
+        player.stop();
         resetVoteSkip();
         console.log("🔌 Disconnected from VC");
       });
@@ -398,10 +572,11 @@ client.on("interactionCreate", async (interaction) => {
             .setTitle("▶️  Playing")
             .setDescription(`**#${currentIndex + 1} — ${playlist[currentIndex].name}**`)
             .addFields(
-              { name: "Total tracks", value: `${playlist.length}`, inline: true },
-              { name: "Channel", value: `${voiceChannel.name}`, inline: true }
+              { name: "Folder",       value: `\`${activeFolderName}\``, inline: true },
+              { name: "Total tracks", value: `${playlist.length}`,      inline: true },
+              { name: "Channel",      value: `${voiceChannel.name}`,    inline: true }
             )
-            .setFooter({ text: "Use /queue to see all tracks • /skip to vote skip" }),
+            .setFooter({ text: "Use /queue to see all tracks • /switchfolder to change playlist" }),
         ],
       });
     } catch (err) {
@@ -410,19 +585,13 @@ client.on("interactionCreate", async (interaction) => {
     }
   }
 
-  //pause------------------------->
-
+  //pause
   if (commandName === "pause") {
     if (player.state.status !== AudioPlayerStatus.Playing) {
-      return interaction.reply({
-        content: "❌ Nothing is playing.",
-        flags: MessageFlags.Ephemeral,
-      });
+      return interaction.reply({ content: "❌ Nothing is playing.", flags: MessageFlags.Ephemeral });
     }
-
     player.pause();
     isLooping = false;
-
     return interaction.reply({
       embeds: [
         new EmbedBuilder()
@@ -432,18 +601,13 @@ client.on("interactionCreate", async (interaction) => {
     });
   }
 
-  //resume-------------------------?>
+  //resume
   if (commandName === "resume") {
     if (player.state.status !== AudioPlayerStatus.Paused) {
-      return interaction.reply({
-        content: "❌ Not paused.",
-        flags: MessageFlags.Ephemeral,
-      });
+      return interaction.reply({ content: "❌ Not paused.", flags: MessageFlags.Ephemeral });
     }
-
     player.unpause();
     isLooping = true;
-
     return interaction.reply({
       embeds: [
         new EmbedBuilder()
@@ -453,33 +617,30 @@ client.on("interactionCreate", async (interaction) => {
     });
   }
 
-  // leave-------------------------?>
-
+  // leave 
   if (commandName === "leave") {
     const conn = getVoiceConnection(guild.id);
-
     if (!conn) {
-      return interaction.reply({
-        content: "❌ Not in a voice channel.",
-        flags: MessageFlags.Ephemeral,
-      });
+      return interaction.reply({ content: "❌ Not in a voice channel.", flags: MessageFlags.Ephemeral });
     }
-
-    isLooping = false;
+    isLooping         = false;
+    currentConnection = null;
+    currentGuildId    = null;
     player.stop();
     conn.destroy();
-    currentConnection = null;
-    currentGuildId = null;
     resetVoteSkip();
-
     return interaction.reply("poitu varen mamae durrr 👋");
   }
 });
 
+// Boot 
 client.once("clientReady", () => {
   console.log(`🤖 Logged in as ${client.user.tag}`);
-  console.log(`🎧 Tracks loaded: ${playlist.length}`);
-  playlist.forEach((t, i) => console.log(`  ${i + 1}. ${t.name}`));
+  console.log(`📁 Folders loaded: ${folderNames.length}`);
+  folderNames.forEach((name) => {
+    console.log(`   └─ ${name}: ${allFolders[name].length} tracks`);
+  });
+  if (activeFolderName) console.log(`🎯 Default folder: ${activeFolderName}`);
 });
 
 client.on("error", console.error);
